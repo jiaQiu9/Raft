@@ -18,8 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
+	"cs350/labgob"
 	"cs350/labrpc"
-	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -151,12 +152,14 @@ func NewElectionTime() time.Time {
 func (rf *Raft) stepDown(term int) {
 	rf.State = Follower
 	rf.VotedFor = -1 // should this be turned to candidateid ?
-	rf.ElectionTime = NewElectionTime()
+	//rf.ElectionTime = NewElectionTime()
 	rf.CurrentTerm = term
+
 	// nil for the followers, because they are not the leader and do not need this
 	rf.NextIndex = nil
 	rf.MatchIndex = nil
 	//log.Println("151 rf Term ", rf.CurrentTerm, "id", rf.me, "step down to", rf.State, " votedfor", rf.VotedFor)
+	rf.persist()
 }
 
 // return currentTerm and whether this server
@@ -184,10 +187,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	log.Println("Persist(), Server(Caller)", rf.me)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Log)
+	e.Encode(rf.CurrentTerm)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -204,6 +216,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var CurrentTerm, VotedFor int
+	var Log []LogEntry
+	if d.Decode(&VotedFor) != nil || d.Decode(&Log) != nil || d.Decode(&CurrentTerm) != nil {
+		log.Println("ReadPersist(), Server(caller)", rf.me, "currentTerm", d.Decode(&CurrentTerm), "VotedFor", d.Decode(&VotedFor), "log", d.Decode(&Log))
+		//log.Panicln("Fail to decode")
+	} else {
+		rf.CurrentTerm = CurrentTerm
+		rf.VotedFor = VotedFor
+		rf.Log = Log
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -243,6 +267,7 @@ func (rf *Raft) IfCommit(term int) {
 	//leader commit index == lastlog index then the log is already commited
 	// to not waste time commiting logs that are already commited
 	if rf.CommitIndex == lastLogIndex {
+		log.Println("IF Commit, Server", rf.me, "State", rf.State, " commit Index=lastLogIndex")
 		return
 	}
 
@@ -273,6 +298,7 @@ func (rf *Raft) Commiter(signal <-chan bool, applyCh chan<- ApplyMsg) {
 		<-signal
 
 		rf.mu.Lock()
+		log.Println("Commiter, checking if using commit")
 		// try to commit until the current commit index, before the leader is taken out/dies
 		for rf.CommitIndex > rf.LastApplied {
 			//If commitIndex > lastApplied: increment lastApplied, apply
@@ -355,6 +381,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 	}
+	log.Println("AppendEntries before persist(), Server(leader)", args.LeaderId, "Server", rf.me)
+	rf.persist()
 
 	if args.LeaderCommit > rf.CommitIndex {
 		//5. if leaderCommit > commitIndex, set CommitIndex= min(LeaderCommit, index of last new entry)
@@ -371,46 +399,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sentAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	log.Println("sentApE server(leader)", rf.me, "to server", server, "args", fmt.Sprintf("%+v", args), "reply", reply)
+	//log.Println("sentApE server(leader)", rf.me, "to server", server, "args", fmt.Sprintf("%+v", args), "reply", reply)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	log.Println("sentApE after server(leader)", rf.me, "to server", server, "reply", reply)
 	return ok
 }
-
-// using this function to construct the appendEntrie arguments because it is used multiple times in the
-// ticker function, either for heartbeat or normal appendEntries
-// func (rf *Raft) makeArgsApEt(server int) *AppendEntriesArgs {
-// 	rf.mu.Lock()
-// 	log.Println("MakeArgsApEt server(leader)", rf.me, "to server", server)
-// 	// get the prevLogIndex through nextIndex -1
-// 	//get the prevLogTerm trough the prev logindex's term
-// 	// this would mean that the most recent entry is the prelog
-// 	prevLogIndex := rf.NextIndex[server] - 1
-// 	log.Println("rf.NextIndex[server]", rf.NextIndex[server], "server", server,"server(leader)",rf.me )
-// 	log.Println("prevLogIndex in makeArgsApEt", prevLogIndex)
-// 	//log.Println("the log", rf.Log)
-// 	prevLogTerm := rf.Log[prevLogIndex].EntryTerm
-
-// 	//checking if there is a need for Entries
-// 	// then get the log entries from the point where both logs agree
-// 	var entries []LogEntry
-// 	if rf.Log[len(rf.Log)-1].Index >= rf.NextIndex[server] {
-// 		//slicing from the matching point to the end of the Log to construct the needed entries
-// 		entries = rf.Log[rf.NextIndex[server]:]
-// 	}
-
-// 	rf.mu.Unlock()
-// 	// formatting and return
-// 	return &AppendEntriesArgs{
-// 		LeaderId:     rf.me,
-// 		LeaderTerm:   rf.CurrentTerm,
-// 		PrevLogIndex: prevLogIndex,
-// 		PrevLogTerm:  prevLogTerm,
-// 		Entries:      entries,
-// 		LeaderCommit: rf.CommitIndex,
-// 	}
-
-// }
 
 // helper function that deals with sending appendentries and dealing with the reply
 // more for shrinking the ticker function and not doing everything there
@@ -422,11 +415,7 @@ func (rf *Raft) helpApEtReplySend(server int, term int) {
 		rf.mu.Unlock()
 		return
 	}
-	rf.mu.Unlock() // unlock, no read or write
-	//log.Println("helAp server(leader)", rf.me, "to server", server, "make argsApEt")
-	// construct the argument for append entry
 
-	rf.mu.Lock()
 	log.Println("MakeArgsApEt server(leader)", rf.me, "to server", server, "rf.NexIndx(server)", rf.NextIndex[server])
 	// get the prevLogIndex through nextIndex -1
 	//get the prevLogTerm trough the prev logindex's term
@@ -479,7 +468,8 @@ func (rf *Raft) helpApEtReplySend(server int, term int) {
 			} else {
 				// when the reply.success if false, the first two conidtions
 				// how to use the reply term, then move to the first index of the term?
-				rf.NextIndex[server]-- // or I could rf.NextIndex[server]=1 to give the entire log to the follower
+				half := args.PrevLogIndex/2 + 1
+				rf.NextIndex[server] = half // or I could rf.NextIndex[server]=1 to give the entire log to the follower
 				if rf.NextIndex[server] < 1 {
 					rf.NextIndex[server] = 1
 				}
@@ -511,37 +501,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if args.Term > rf.CurrentTerm {
 		//if term T > current term: set current term =t, convert
-		rf.stepDown(args.Term)
+		cterm := args.Term
+		rf.stepDown(cterm)
 	}
+	log.Println("Testing in Request Vote 2")
+	lastLogIndex := rf.Log[len(rf.Log)-1].Index    // the current server, not the one requesting the vote
+	lastLogTerm := rf.Log[len(rf.Log)-1].EntryTerm // the current server, not the one requesting the vote
 
-	if args.LastLogIndex == -1 && args.LastLogTerm == -1 {
-		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-			// how to check if the candidate has the most up-to-date log
-			// do i need to consider for 2A
-			reply.VoteGranted = true
-			reply.Term = rf.CurrentTerm
-			rf.VotedFor = args.CandidateId
+	//the candidate log is not as upto date as the server(the one granting votes)
+	if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
+		// not granting vote and return the current term
+		// the current term would be equal, so does not make the candidate turn to follower
+		rf.mu.Unlock()
+		return
+	}
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
+		// how to check if the candidate has the most up-to-date log
+		// do i need to consider for 2A
+		reply.VoteGranted = true
+		reply.Term = rf.CurrentTerm
+		rf.VotedFor = args.CandidateId
+		rf.persist()
 
-		}
-	} else {
-		lastLogIndex := rf.Log[len(rf.Log)-1].Index    // the current server, not the one requesting the vote
-		lastLogTerm := rf.Log[len(rf.Log)-1].EntryTerm // the current server, not the one requesting the vote
-
-		//the candidate log is not as upto date as the server(the one granting votes)
-		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
-			// not granting vote and return the current term
-			// the current term would be equal, so does not make the candidate turn to follower
-			rf.mu.Unlock()
-			return
-		}
-		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-			// how to check if the candidate has the most up-to-date log
-			// do i need to consider for 2A
-			reply.VoteGranted = true
-			reply.Term = rf.CurrentTerm
-			rf.VotedFor = args.CandidateId
-
-		}
 	}
 	rf.mu.Unlock()
 }
@@ -613,6 +594,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.NextIndex[rf.me] += 1
 	rf.MatchIndex[rf.me] = index
 	log.Println("Start server", rf.me, "add new command to log len", len(rf.Log))
+	rf.persist()
 	rf.mu.Unlock()
 	for server := range rf.peers {
 		if server != rf.me {
@@ -656,25 +638,18 @@ func (rf *Raft) ticker() {
 			/**********************************Leader Job-> heartbeat + Append Entries********************************************************/
 			rf.ElectionTime = NewElectionTime()
 			log.Println("Server", rf.me, "Starting heartbeat/appendEntries")
+			cterm := rf.CurrentTerm
 			rf.mu.Unlock()
 
 			for server := range rf.peers {
 				if server != rf.me {
-					log.Println("Server(leader)", rf.me, "to server", server, "nextindex", rf.NextIndex)
+					//log.Println("Server(leader)", rf.me, "to server", server, "nextindex", rf.NextIndex)
 					// the new helper function; the previous lines will be replaced by the helper when it is completed
-					go rf.helpApEtReplySend(server, rf.CurrentTerm) // the reply and args for the actual append entries will be dealt inside the helper
+					go rf.helpApEtReplySend(server, cterm) // the reply and args for the actual append entries will be dealt inside the helper
 
 				}
 			}
-			// rf.mu.Lock()
-			// if rf.State != Leader {
-			// 	log.Println("Server", rf.me, "term", rf.CurrentTerm, " stepped down/replaced")
-			// 	rf.mu.Unlock()
-			// 	continue
 
-			// }
-
-			//rf.mu.Unlock()
 			time.Sleep(time.Millisecond * 100)
 
 		} else if rf.ElectionTime.After(time.Now()) && rf.State != Leader {
@@ -691,6 +666,8 @@ func (rf *Raft) ticker() {
 			rf.CurrentTerm = rf.CurrentTerm + 1 //Increment currentTerm
 			rf.VotedFor = rf.me                 //Vote for self
 			rf.ElectionTime = NewElectionTime() //Reset election timer
+			rf.persist()
+
 			rf.mu.Unlock()
 
 			votes := 1 // voting for them self
@@ -698,21 +675,11 @@ func (rf *Raft) ticker() {
 			for peer := range rf.peers {
 				if peer != rf.me {
 					// requestvote arguments for current rf
-					args := RequestVoteArgs{}
-					if len(rf.Log) < 1 {
-						args = RequestVoteArgs{
-							Term:         rf.CurrentTerm,
-							CandidateId:  rf.me,
-							LastLogIndex: -1,
-							LastLogTerm:  -1,
-						}
-					} else {
-						args = RequestVoteArgs{
-							Term:         rf.CurrentTerm,
-							CandidateId:  rf.me,
-							LastLogIndex: rf.Log[len(rf.Log)-1].Index,
-							LastLogTerm:  rf.Log[len(rf.Log)-1].EntryTerm,
-						}
+					args := RequestVoteArgs{
+						Term:         rf.CurrentTerm,
+						CandidateId:  rf.me,
+						LastLogIndex: rf.Log[len(rf.Log)-1].Index,
+						LastLogTerm:  rf.Log[len(rf.Log)-1].EntryTerm,
 					}
 
 					reply := RequestVoteReply{}
@@ -720,9 +687,10 @@ func (rf *Raft) ticker() {
 					// deleted go keyword for rf.send request
 					log.Println("Term", rf.CurrentTerm, "server", rf.me, "send request to", peer)
 					rf.sendRequestVote(peer, &args, &reply)
-					log.Println("Term", rf.CurrentTerm, "server(me) ", rf.me, "from", peer, "success:", reply.VoteGranted)
 
 					rf.mu.Lock()
+					log.Println("Term", rf.CurrentTerm, "server(me) ", rf.me, "from", peer, "success:", reply.VoteGranted)
+
 					if reply.Term > rf.CurrentTerm {
 						log.Println("Term ", rf.CurrentTerm, " server ", rf.me, ",steping down, reply.term", reply.Term)
 						rf.stepDown(reply.Term)
@@ -773,12 +741,13 @@ func (rf *Raft) ticker() {
 					rf.MatchIndex[i] = 0
 				}
 				rf.MatchIndex[rf.me] = lastLogIndex
+				cterm := rf.CurrentTerm
 				rf.mu.Unlock()
 				// sent the initial appendentries right after becoming the leader to all peers
 				for server := range rf.peers {
 					if server != rf.me {
-						log.Println("Sent initial heartbeat leader", rf.me, "to server", server, "Log len", len(rf.Log))
-						go rf.helpApEtReplySend(server, rf.CurrentTerm)
+						//log.Println("Sent initial heartbeat leader", rf.me, "to server", server, "Log len", len(rf.Log))
+						go rf.helpApEtReplySend(server, cterm)
 
 					}
 				}
@@ -829,12 +798,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.Log = append(rf.Log, LogEntry{Index: 0, EntryTerm: rf.CurrentTerm, LogCommand: -1})
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// LogEntry format {Index, EntryTerm, LogCommand}
-	rf.Log = append(rf.Log, LogEntry{0, rf.CurrentTerm, nil})
+
 	applyCh <- ApplyMsg{
 		CommandValid: true,
 		Command:      rf.Log[0].LogCommand,
